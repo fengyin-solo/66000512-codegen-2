@@ -117,6 +117,7 @@ __pycache__/
 venv/
 env/
 ENV/
+.venv-linux/
 pip-wheel-metadata/
 *.egg-info/
 .eggs/
@@ -216,6 +217,8 @@ media/
 generated/
 artifacts/
 sandbox/
+# 分析报告导出目录（报告文件与 records.json 由后端运行时维护）
+backend/exports/
 
 # =========================
 # Archives

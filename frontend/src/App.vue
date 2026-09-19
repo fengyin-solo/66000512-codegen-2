@@ -21,7 +21,13 @@
           <el-form-item>
             <el-button type="primary" @click="generate" :loading="store.loading">🔍 生成信号并分析</el-button>
           </el-form-item>
+          <el-form-item>
+            <el-button @click="openExport" :disabled="!store.result">📤 导出分析报告</el-button>
+          </el-form-item>
         </el-form>
+        <div v-if="!store.result" class="export-empty-hint">
+          暂无分析结果可导出，请先生成信号并完成分析；分析完成后可勾选三块图形数据与识别结论导出报告。
+        </div>
       </div>
 
       <div v-if="store.result" class="results-grid">
@@ -30,20 +36,33 @@
       </div>
       <WaterfallPlot v-if="store.result" />
       <ModulationResult v-if="store.result" />
+
+      <ExportRecords @open-dialog="openExport" />
     </main>
+
+    <ExportDialog v-model="exportVisible" :result="store.result" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { reactive } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import SpectrumPlot from './components/SpectrumPlot.vue'
 import ConstellationPlot from './components/ConstellationPlot.vue'
 import WaterfallPlot from './components/WaterfallPlot.vue'
 import ModulationResult from './components/ModulationResult.vue'
+import ExportDialog from './components/ExportDialog.vue'
+import ExportRecords from './components/ExportRecords.vue'
 import { useSignalStore } from './store/signal'
+import { useExportStore } from './store/export'
 const store = useSignalStore()
+const exportStore = useExportStore()
 const form = reactive({ modulation: 'QPSK', samples: 1024, snr: 20 })
+const exportVisible = ref(false)
 function generate() { store.analyze({ ...form }) }
+function openExport() { exportVisible.value = true }
+onMounted(() => {
+  exportStore.loadRecords()
+})
 </script>
 
 <style>
@@ -56,4 +75,5 @@ body{font-family:system-ui,sans-serif;background:#0f1923;color:#e0e0e0}
 .app-main{padding:16px 40px}
 .control-card{background:#1a2332;border-radius:8px;padding:16px 20px;margin-bottom:16px;border:1px solid #2a3a4a}
 .results-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.export-empty-hint{font-size:12px;color:#8899aa;margin-top:4px}
 </style>

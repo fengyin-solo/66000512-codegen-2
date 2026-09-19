@@ -1,20 +1,60 @@
 import math
+import os
 import random
+import uuid
+
 import numpy as np
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+from .exports import EXPORT_SECTIONS, ExportError, ExportManager, SECTION_LABELS, SIMULATABLE_STEPS, STEP_LABELS
 
 app = FastAPI(title="RF Signal Analyzer")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 MODULATION_TYPES = ["AM", "FM", "BPSK", "QPSK", "16QAM"]
 
+EXPORT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "exports")
+export_manager = ExportManager(EXPORT_DIR)
+
+
+@app.exception_handler(ExportError)
+def export_error_handler(request: Request, exc: ExportError):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "ok": False,
+            "failedStep": exc.step,
+            "failedStepLabel": STEP_LABELS.get(exc.step, exc.step),
+            "message": exc.message,
+        },
+    )
+
 
 class GenerateRequest(BaseModel):
     modulation: str = "QPSK"
     samples: int = 1024
     snr: float = 20.0
+
+
+class ExportRequest(BaseModel):
+    resultId: str
+    sections: list[str]
+    result: dict
+    source: dict | None = None
+    force: bool = False
+    # 联调/测试用：人为让某一步失败，验证失败提示与重试入口
+    forceFailStep: str | None = None
+
+
+class ExportRetryRequest(BaseModel):
+    result: dict | None = None
+    sections: list[str] | None = None
+    source: dict | None = None
+    forceFailStep: str | None = None
 
 
 def generate_signal(mod: str, samples: int, snr: float) -> np.ndarray:
@@ -74,12 +114,14 @@ def compute_fft(i: np.ndarray, q: np.ndarray, fs: float = 1000.0):
 def compute_waterfall(i: np.ndarray, q: np.ndarray, fs: float = 1000.0, rows: int = 40):
     """Compute spectrogram waterfall"""
     n = len(i)
+    # 样本较少时自适应减少行数，保证每段至少 8 个采样点
+    rows = min(rows, max(1, n // 8))
     seg = n // rows
     waterfall = []
     for r in range(rows):
         seg_i = i[r * seg:(r + 1) * seg]
         seg_q = q[r * seg:(r + 1) * seg]
-        if len(seg_i) < 32:
+        if len(seg_i) < 8:
             break
         fft = np.fft.fftshift(np.fft.fft(seg_i + 1j * seg_q))
         mag_db = 20 * np.log10(np.abs(fft) / len(seg_i) + 1e-10)
@@ -140,8 +182,103 @@ def generate_and_analyze(req: GenerateRequest):
     constellation = [{"i": float(i[k]), "q": float(q[k])} for k in range(0, n, step)]
 
     return {
+        "resultId": uuid.uuid4().hex,
+        "meta": {"modulation": req.modulation, "samples": req.samples, "snr": req.snr},
         "spectrum": {"frequencies": freqs, "magnitudes": mags},
         "waterfall": waterfall,
         "constellation": constellation,
         "modulation": modulation
     }
+
+
+@app.get("/api/exports/sections")
+def export_sections():
+    """可勾选的导出板块定义，供前端渲染复选框。"""
+    return {"sections": [{"key": k, "label": SECTION_LABELS[k]} for k in EXPORT_SECTIONS]}
+
+
+@app.post("/api/exports")
+def create_export(req: ExportRequest):
+    if req.forceFailStep and req.forceFailStep not in SIMULATABLE_STEPS:
+        # 参数非法属于校验阶段问题
+        raise ExportError("validate", f"不支持的故障模拟步骤：{req.forceFailStep}", status_code=400)
+    try:
+        out = export_manager.create_export(
+            result_id=req.resultId,
+            sections=req.sections,
+            result_data=req.result,
+            source=req.source,
+            force=req.force,
+            fail_step=req.forceFailStep,
+        )
+        return {"ok": True, **out}
+    except ExportError as e:
+        # 校验类错误（400/409）不落失败记录；真正执行到写文件/记录步骤失败才留痕
+        failed_record = None
+        if e.status_code == 500:
+            failed_record = export_manager.record_failure(
+                result_id=req.resultId,
+                sections=req.sections,
+                step=e.step,
+                message=e.message,
+                source=req.source,
+            )
+        return JSONResponse(
+            status_code=e.status_code,
+            content={
+                "ok": False,
+                "failedStep": e.step,
+                "failedStepLabel": STEP_LABELS.get(e.step, e.step),
+                "message": e.message,
+                "record": failed_record,
+            },
+        )
+
+
+@app.get("/api/exports")
+def list_exports():
+    return {"records": export_manager.list_records()}
+
+
+@app.post("/api/exports/{export_id}/retry")
+def retry_export(export_id: str, req: ExportRetryRequest):
+    if req.forceFailStep and req.forceFailStep not in SIMULATABLE_STEPS:
+        raise ExportError("validate", f"不支持的故障模拟步骤：{req.forceFailStep}", status_code=400)
+    out = export_manager.retry_export(
+        export_id=export_id,
+        result_data=req.result,
+        sections=req.sections,
+        source=req.source,
+        fail_step=req.forceFailStep,
+    )
+    return {"ok": True, **out}
+
+
+@app.get("/api/exports/{export_id}")
+def get_export(export_id: str):
+    record = export_manager.get_record(export_id)
+    if record is None:
+        return JSONResponse(status_code=404, content={"message": "导出记录不存在"})
+    return record
+
+
+@app.get("/api/exports/{export_id}/download")
+def download_export(export_id: str):
+    record = export_manager.get_record(export_id)
+    if record is None:
+        return JSONResponse(status_code=404, content={"message": "导出记录不存在"})
+    if record["status"] != "success" or not record.get("fileName"):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "message": "报告文件缺失，无法下载",
+                "status": record["status"],
+                "failedStep": record.get("failStep"),
+            },
+        )
+    path = os.path.join(EXPORT_DIR, record["fileName"])
+    return FileResponse(path, media_type="application/json", filename=record["fileName"])
+
+
+# 挂载已生成的报告目录（按文件名访问，下载接口之外的备用入口）
+app.mount("/exports-files", StaticFiles(directory=EXPORT_DIR), name="exports-files")
