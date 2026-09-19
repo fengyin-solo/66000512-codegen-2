@@ -30,6 +30,7 @@
       </div>
       <WaterfallPlot v-if="store.result" />
       <ModulationResult v-if="store.result" />
+      <ExportPanel />
     </main>
   </div>
 </template>
@@ -40,6 +41,7 @@ import SpectrumPlot from './components/SpectrumPlot.vue'
 import ConstellationPlot from './components/ConstellationPlot.vue'
 import WaterfallPlot from './components/WaterfallPlot.vue'
 import ModulationResult from './components/ModulationResult.vue'
+import ExportPanel from './components/ExportPanel.vue'
 import { useSignalStore } from './store/signal'
 const store = useSignalStore()
 const form = reactive({ modulation: 'QPSK', samples: 1024, snr: 20 })

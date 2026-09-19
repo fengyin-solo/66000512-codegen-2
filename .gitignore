@@ -234,3 +234,6 @@ sandbox/
 *.pid
 *.seed
 *.pid.lock
+
+# Exported analysis reports and export records (runtime data)
+backend/export_data/
